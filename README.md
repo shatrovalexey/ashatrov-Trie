@@ -3,8 +3,8 @@
 Алгоритм "trie".
 
 ### РЕШЕНИЕ
-`perl build_index.pl`
-`perl search.pl`
+* `perl build_index.pl` - построить индекс
+* `perl search.pl` - поиск по индексу
 
 ### АВТОР
 Шатров Алексей Сергеевич <mail@ashatrov.ru>
