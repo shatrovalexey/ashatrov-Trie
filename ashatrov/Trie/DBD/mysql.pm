@@ -136,8 +136,6 @@ SELECT
 FROM
 	`$self->{'table'}` AS `t1`;
 .
-	warn scalar localtime;
-
 	$self->{'dba'}->do($_) foreach <<".", <<".";
 DROP TEMPORARY TABLE IF EXISTS `$temp`;
 .
@@ -210,8 +208,6 @@ FROM
 	$self->{'dba'}->do(<<".");
 DROP TEMPORARY TABLE IF EXISTS `$temp`;
 .
-	warn scalar localtime;
-
 	$result
 }
 

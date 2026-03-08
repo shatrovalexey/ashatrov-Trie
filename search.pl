@@ -1,15 +1,15 @@
-#!/usr/bin/perl -I.
+#!/usr/bin/perl -I. -Ilib
 
 use strict;
 use ashatrov::Trie;
-use Data::Dumper;
+require 'elapsed.pm';
 
 # ПОИСК
 
 my $query = 'tn';
-
+my $dba = require('dba.pm');
 # описан драйвер только для MySQL v8x
-my $idxh = ashatrov::Trie->new('dba' => require('dba.pm'), 'table' => 'offer');
+my $idxh = ashatrov::Trie->new('dba' => $dba, 'table' => 'offer');
 my $data = $idxh->search($query, &ashatrov::Trie::FTS_MODE_GTE());
 
-warn scalar @$data;
+warn 'rows: ', scalar @$data;
