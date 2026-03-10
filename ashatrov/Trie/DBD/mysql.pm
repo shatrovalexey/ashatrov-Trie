@@ -1,5 +1,9 @@
 package ashatrov::Trie::DBD::mysql;
 use strict;
+use constant {
+	'MAX_ROWS' => 40
+	,
+};
 
 sub clean($;@) {
 	my ($self, @nodes) = @_;
@@ -24,64 +28,91 @@ $sqlWhere;
 sub search($\@\%;$) {
 	my ($self, $words, $table, $mode) = @_;
 
-	$self->{'dba'}->do($_) foreach <<".", <<".";
-DROP TEMPORARY TABLE IF EXISTS `$table->{'result'}`;
+	$self->{'dba'}->do(<<".") foreach @$table{+ qw{words result}};
+DROP TEMPORARY TABLE IF EXISTS `$_`;
 .
+	$self->{'dba'}->do(<<".");
 CREATE TEMPORARY TABLE IF NOT EXISTS `$table->{'result'}`(
 	`id_node` BIGINT UNSIGNED NOT null
 	, `table_node` VARCHAR(20) CHARSET latin1 NOT null
-	, `weight` INT UNSIGNED NOT null
+	, `weight` TINYINT UNSIGNED NOT null
 
-	, UNIQUE(`table_node`, `id_node`)
+	, PRIMARY KEY(`table_node`, `id_node`)
 	, INDEX(`weight`)
 );
 .
-	my $sth_ins = $self->{'dba'}->prepare(<<".");
-INSERT IGNORE INTO
-	`$table->{'result'}`(`id_node`, `table_node`, `weight`)
-WITH RECURSIVE `$table->{'temp'}` AS (
-	SELECT 
-		`id`,
-		`id_parent`,
-		`id_node`,
-		`table_node`,
-		1 as `pos`
-	FROM
-		`$self->{'table'}` AS `t1` FORCE INDEX (`idx_fts_search`)
-	WHERE
-		(`char` = ?)
+	$self->{'dba'}->do(<<"." . join(<<'.', (<<'.') x @$words), undef, @$words);
+CREATE TEMPORARY TABLE IF NOT EXISTS `$table->{'words'}`(
+	`word` VARCHAR(50) NOT null
+	, `char` CHAR(1) GENERATED ALWAYS AS (substring(`word` FROM 1 FOR 1)) STORED
+	, `length` TINYINT UNSIGNED GENERATED ALWAYS AS (char_length(`word`)) STORED
 
-	UNION ALL
-
-	SELECT
-		`c`.`id`,
-		`c`.`id_parent`,
-		`c`.`id_node`,
-		`c`.`table_node`,
-		`wc`.`pos` + 1
-	FROM
-		`$table->{'temp'}` AS `wc`
-
-			INNER JOIN `$self->{'table'}` AS `c` FORCE INDEX (`idx_fts_parent`)
-				ON (`c`.`id_parent` = `wc`.`id`)
-					AND (`c`.`char` = substring(?, `wc`.`pos` + 1, 1))
-)
+	, PRIMARY KEY(`word`)
+) IGNORE AS
+.
+UNION DISTINCT
+.
+SELECT
+	? AS `word`;
+.
+	my $sqlSel = <<".";
 SELECT
 	`t1`.`id_node`
 	, `t1`.`table_node`
-	, count(*) AS `weight`
+	, count(*) as `weight`
 FROM
-	`$table->{'temp'}` AS `t1`
-WHERE
-	(`t1`.`pos` = ?)
-GROUP BY
-	1, 2;
-.
-	$sth_ins->execute(substr($_, 0, 1), $_, length) foreach @$words;
-	$sth_ins->finish;
+	`$table->{'words'}` AS `w`
 
-	my @args;
-	my $sql = <<".";
+		CROSS JOIN LATERAL (
+			WITH RECURSIVE `$table->{'search'}` AS (
+				SELECT 
+					`t1`.id,
+					`t1`.id_parent,
+					`t1`.id_node,
+					`t1`.table_node,
+					1 as pos
+				FROM
+					`$self->{'table'}` AS `t1` FORCE INDEX(`idx_fts_search`)
+				WHERE
+					(`t1`.`char` = `w`.`char`)
+						AND (`w`.`length` > 0)
+				UNION ALL
+				SELECT
+					`c`.`id`
+					, `c`.`id_parent`
+					, `c`.`id_node`
+					, `c`.`table_node`
+					, `wc`.`pos` + 1 AS `pos`
+				FROM
+					`$table->{'search'}` AS `wc`
+
+						INNER JOIN `$self->{'table'}` AS `c` FORCE INDEX(`id_parent_char`)
+							ON (`c`.`id_parent` = `wc`.`id`)
+								AND (`c`.`char` = substring(`w`.`word`, `wc`.`pos` + 1, 1))
+				WHERE
+					(`wc`.`pos` < `w`.`length`)
+			)
+			SELECT
+				`fs1`.`id_node`
+				, `fs1`.`table_node`
+			FROM
+				`$table->{'search'}` AS `fs1`
+			WHERE
+				(`fs1`.`pos` = `w`.`length`)
+		) AS `t1`
+GROUP BY
+	`w`.`word`
+	, `t1`.`id_node`
+	, `t1`.`table_node`;
+.
+	# die $sqlSel, "\n", @{$self->{'dba'}->selectcol_arrayref(qq{EXPLAIN ANALYZE $sqlSel})};
+
+	$self->{'dba'}->do(<<".");
+INSERT IGNORE INTO
+	`$table->{'result'}`(`id_node`, `table_node`, `weight`)
+$sqlSel
+.
+	my $sql = <<"."; $sql .= <<"." if $mode; $sql .= <<'.';
 SELECT
 	`t1`.`table_node` AS `table`
 	, `t1`.`id_node` AS `id`
@@ -89,20 +120,20 @@ SELECT
 FROM
 	`$table->{'result'}` AS `t1`
 .
-	$sql .= <<"." if $mode;
 WHERE
 	(`t1`.`weight` $mode ?)
 .
-	$sql .= <<'.';
 ORDER BY
-	3 DESC;
+	`t1`.`weight` DESC;
 .
+	my @args;
+
 	push @args, scalar @$words if $mode;
 
 	my $result = $self->{'dba'}->selectall_arrayref($sql, {'Slice' => {},}, @args);
 
-	$self->{'dba'}->do(<<".");
-DROP TEMPORARY TABLE IF EXISTS `$table->{'result'}`;
+	$self->{'dba'}->do(<<".") foreach @$table{+ qw{words result}};
+DROP TEMPORARY TABLE IF EXISTS `$_`;
 .
 	$result
 }
@@ -116,19 +147,14 @@ CREATE TABLE IF NOT EXISTS `$self->{'table'}`(
 	, `id_node` BIGINT UNSIGNED NOT null
 	, `table_node` VARCHAR(20) CHARSET latin1 NOT null
 	, `char` CHAR(1) CHARACTER SET utf8mb4 NOT null
+	, `is_root` TINYINT UNSIGNED GENERATED ALWAYS AS (`id_parent` IS null) STORED
+	, `length` TINYINT UNSIGNED NOT null
 
-	, INDEX `id_parent` (`id_parent`, `char`)
-	, INDEX `char` (`char`)
-	, PRIMARY KEY(`id`)
-	, INDEX `id_node` (`id_node`, `table_node`)
-	, INDEX `idx_fts_search` (`char`, `id_parent`, `id`, `id_node`, `table_node`)
-	, INDEX `idx_fts_parent` (`id_parent`, `char`, `id`)
-	, INDEX `idx_fts_node` (`id_node`, `table_node`)
-	, FOREIGN KEY(`id_parent`)
-		REFERENCES `$self->{'table'}` (`id`)
-		ON DELETE CASCADE
-		ON UPDATE CASCADE
-);
+	, INDEX(`id`)
+	, INDEX `id_parent_char`(`id_parent`, `char`)
+	, INDEX `id_node_table_node`(`id_node`,`table_node`)
+	, INDEX `idx_fts_search`(`char`, `id_parent`, `id`, `id_node`, `table_node`)
+) PARTITION BY KEY(`char`) PARTITIONS 64;
 .
 	my ($id_char) = @{$self->{'dba'}->selectcol_arrayref(<<".", undef, 1)} or return;
 SELECT
@@ -144,6 +170,7 @@ CREATE TEMPORARY TABLE IF NOT EXISTS `$temp`(
 	, `id_parent` BIGINT UNSIGNED NOT null
 	, `id_node` BIGINT UNSIGNED NOT null
 	, `char` CHAR(1) NOT null
+	, `length` TINYINT UNSIGNED NOT null
 ) ENGINE = CSV;
 .
 	my $sth_sel = $self->{'dba'}->prepare($sqlSelect);
@@ -151,12 +178,12 @@ CREATE TEMPORARY TABLE IF NOT EXISTS `$temp`(
 
 	my ($sqlPrefix, $sqlSuffix) = (<<".", <<'.');
 INSERT IGNORE INTO
-	`$temp`(`id_parent`, `id`, `id_node`, `char`)
+	`$temp`(`id_parent`, `id`, `id_node`, `char`, `length`)
 VALUES
 .
-(?, ?, ?, ?)
+(?, ?, ?, ?, ?)
 .
-	my $maxSTH = 20;
+	my $maxSTH = &MAX_ROWS();
 	my $getSTH = sub {
 		my $count = shift;
 
@@ -169,38 +196,42 @@ VALUES
 	my ($count, @data) = 0;
 
 	while (my ($id_node, $fts) = $sth_sel->fetchrow_array) {
-		&utf8::decode($fts);
-
 		warn $id_node;
 
-		while ($fts =~ m{\w+}gcsu) {
-			my $word = $&;
+		$self->_getLetter(sub($$$$$$) {
+			my ($k, $letter, $j, $word) = @_;
+			my $id_parent = $k ? qq{$id_char} : 0;
+			my $length = length qq{$$word};
 
-			while ($word =~ m{.}gcsu) {
-				push @data, $id_char ++, $id_char, $id_node, $&;
+			push @data, $id_parent, ++ $id_char, qq{$id_node}, qq{$$letter}, $length;
 
-				next if ++ $count < $maxSTH;
+			return if ++ $count < $maxSTH;
 
-				$sth_ins->execute(@data);
+			$sth_ins->execute(@data);
 
-				($count, @data) = 0
-			}
-		}
+			($count, @data) = 0
+		}, $fts)
 	}
 
-	$getSTH->($count)->execute(@data) if @data;
-
 	$sth_ins->finish;
-	$sth_sel->finish;
 
-	my $result = int $self->{'dba'}->do(<<".", undef, $table);
+	if (@data) {
+		$sth_ins = $getSTH->($count);
+		$sth_ins->execute(@data);
+		$sth_ins->finish;
+	}
+
+	$_->finish foreach $sth_ins, $sth_sel;
+
+	my $result = int $self->{'dba'}->do(<<".", undef, 0, undef, $table);
 INSERT IGNORE INTO
-	`$self->{'table'}`(`id_parent`, `id`, `id_node`, `char`, `table_node`)
+	`$self->{'table'}`(`id_parent`, `id`, `id_node`, `char`, `length`, `table_node`)
 SELECT
-	if(`t1`.`id_parent`, `t1`.`id_parent`, null) AS `id_parent`
+	if(`t1`.`id_parent` > ?, `t1`.`id_parent`, ?) AS `id_parent`
 	, `t1`.`id`
 	, `t1`.`id_node`
 	, `t1`.`char`
+	, `t1`.`length`
 	, ? AS `table_node`
 FROM
 	`$temp` AS `t1`;

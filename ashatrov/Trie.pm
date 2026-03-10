@@ -14,6 +14,8 @@ use constant {
 	, 'FTS_MODE_GTE' => '>='
 	, 'FTS_MODE_LTE' => '<='
 	, 'FTS_MODE_FREE' => ''
+	, 'RX_WORD' => qr{\w+}us
+	, 'RX_LETTER' => qr{.}us
 	,
 };
 
@@ -29,6 +31,8 @@ sub _prepare($\%) {
 
 	warn 'No dba' and return unless exists $args->{'dba'}{'Driver'}{'Name'};
 
+	$args->{'word'} ||= &RX_WORD();
+	$args->{'letter'} ||= &RX_LETTER();
 	$args->{'driver'} = $package->_getName(__PACKAGE__, 'DBD', lc $args->{'dba'}{'Driver'}{'Name'});
 
 	eval {load $args->{'driver'}};
@@ -50,6 +54,33 @@ sub _getSubName($$) {
 
 	$self->_getName($self->{'driver'}, $subName)
 }
+sub _getLetter($\&;@) {
+	my ($self, $sub) = splice @_, 0, 2;
+	my ($i, @result) = 0;
+
+	foreach my $str (@_) {
+		my $j = 0;
+		&utf8::decode($str);
+
+		while ($str =~ m{$self->{'word'}}gc) {
+			my ($word, $k) = ($&, 0);
+
+			while ($word =~ m{$self->{'letter'}}gc) {
+				my $letter = $&;
+
+				$sub->($k => \$letter, $j => \$word, $i => \$str)
+			} continue {
+				$k ++
+			}
+		} continue {
+			$j ++
+		}
+	} continue {
+		$i ++
+	}
+
+	@result
+}
 sub clean($;@) {
 	my $self = shift;
 	my $sub = $self->_getSubName('clean');
@@ -58,14 +89,10 @@ sub clean($;@) {
 }
 sub search($$;$) {
 	my $self = shift;
-	my @words = uniqstr uc(shift) =~ m{\w+}guso or return;
+	my @words = uniqstr uc(shift) =~ m{$self->{'word'}}go or return;
 	my $mode = shift || &FTS_MODE_EQ();
 	my $sub = $self->_getSubName('search');
-	my %table = (
-		'temp' => $self->_getTableName('search')
-		, 'result' => $self->_getTableName('result')
-		,
-	);
+	my %table = map {+ $_ => $self->_getTableName($_),} qw{search result words};
 
 	$self->$sub(\@words, \%table, $mode)
 }
